@@ -164,7 +164,15 @@ class Camera(nn.Module):
             )
         ).squeeze(0)
         self.camera_center = self.C2W[:3, 3]
-
+    
+    def getPixIntrinsic(self):
+        ndc2pix = torch.tensor([
+        [self.w / 2, 0, 0, (self.w) / 2],
+        [0, self.h / 2, 0, (self.h) / 2],
+        [0, 0, 0, 1]]).float().cuda().T
+        
+        intrins = (self.projection_matrix @ ndc2pix)[:3,:3].T
+        return intrins
 
 class GaussianModel:
     def setup_functions(self, scaling_activation_type='sigmoid', scale_min_act=0.001, scale_max_act=0.3, scale_multi_act=0.1):

@@ -39,3 +39,10 @@ rebuttal/
 apps/
 *.sh
 run.py
+results
+laptop
+*.ipynb
+laptop*
+data
+storage
+*registration*

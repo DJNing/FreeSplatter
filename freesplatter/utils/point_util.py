@@ -1,0 +1,359 @@
+import torch
+import cv2
+import numpy as np
+import open3d as o3d
+
+# from pointrix.utils.pose import ConcatRT, quat_to_rotmat, apply_quaternion
+# from pytorch3d.ops import knn_points, knn_gather
+
+def load_ply_as_tensor(filename):
+    '''
+    Load a PLY file as a tensor.
+
+    Args:
+        filename (str): The filename of the PLY file.
+
+    Returns:
+        torch.Tensor: A tensor of shape (N, 3) containing the 3D points.
+    '''
+    pcd = o3d.io.read_point_cloud(filename)
+    points = np.asarray(pcd.points)
+    tensor = torch.tensor(points, dtype=torch.float32)
+    return tensor
+
+def save_tensor_as_ply(tensor, filename):
+    '''
+    Save a tensor as a PLY file.
+
+    Args:
+        tensor (torch.Tensor): A tensor of shape (N, 3).
+        filename (str): The filename to save the PLY file.
+    '''
+    points = tensor.cpu().numpy()
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    o3d.io.write_point_cloud(filename, pcd)
+
+def project_points_to_binary_image(points, K, H, W):
+    '''
+    Project 3D points to a binary image.
+
+    Args:
+        points (torch.Tensor): 3D points in shape (N, 3).
+        K (torch.Tensor): Camera intrinsic matrix in shape (3, 3).
+        H (int): Height of the image.
+        W (int): Width of the image.
+
+    Returns:
+        torch.Tensor: A binary image of shape (H, W) where 1 indicates a point is visible and 0 otherwise.
+    '''
+    # Project the 3D points to 2D using the camera intrinsic matrix
+    # Convert points to homogeneous coordinates
+    points_homogeneous = torch.cat([points, torch.ones(points.size(0), 1).to(points)], dim=1)
+
+    # Project points using the intrinsic matrix
+    projected_points_homogeneous = torch.mm(points_homogeneous, K.T)
+
+    # Normalize by the third coordinate to get 2D image coordinates
+    projected_points = projected_points_homogeneous[:, :2] / projected_points_homogeneous[:, 2].unsqueeze(1)
+
+    # Create a binary image with 1s where the points are visible
+    mask = torch.zeros(H, W, dtype=torch.uint8)
+    mask[projected_points[:, 1].long(), projected_points[:, 0].long()] = 1
+
+    return mask
+
+
+def retrieve_point_cloud(depth: torch.Tensor, K: torch.Tensor, ext: torch.Tensor = None, mask: torch.Tensor = None) -> torch.Tensor:
+    """
+    Retrieve 3D points given a depth map and camera intrinsics (K), and extrinsics. When extrinsics are None, use the identity matrix.
+
+    Args:
+        depth (torch.Tensor): Depth map in shape [H, W].
+        K (torch.Tensor): Camera intrinsic matrix in shape [3, 3].
+        ext (torch.Tensor, optional): Camera extrinsic matrix in shape [4, 4]. Defaults to None, which will use the identity matrix.
+        mask (torch.Tensor, optional): Foreground mask for extracting 3D points in shape [H, W]. Defaults to None.
+
+    Returns:
+        torch.Tensor: Extracted 3D points in shape [K, 3], where K is the number of unmasked points. If no mask is given, K=H*W.
+    """
+    H, W = depth.shape
+    if ext is None:
+        ext = torch.eye(4).to(depth)  # Use identity matrix if extrinsics are not provided
+
+    # Create a grid of pixel coordinates in homogeneous form
+    y, x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+    x = x.to(depth)
+    y = y.to(depth)
+    ones = torch.ones_like(x).to(depth)
+    pixel_coords = torch.stack((x, y, ones), dim=-1).reshape(-1, 3).to(K)  # shape [H*W, 3]
+
+    # Apply the intrinsics to get normalized camera coordinates
+    K_inv = torch.inverse(K)
+    normalized_coords = torch.mm(pixel_coords, K_inv.T) * depth.reshape(-1, 1)
+
+    # Convert to 3D points in the camera frame
+    camera_coords = torch.cat((normalized_coords, ones.reshape(-1, 1)), dim=-1)  # shape [H*W, 4]
+
+    # Apply the extrinsic matrix to get coordinates in the world frame
+    world_coords = torch.mm(camera_coords, ext.T.to(depth))[:, :3]  # shape [H*W, 3] ignoring the homogeneous coordinate
+
+    # Apply mask if provided
+    if mask is not None:
+        masked_indices = torch.where(mask.reshape(-1) > 0)  # Get index of pixels where mask is non-zero
+        pts = world_coords[masked_indices]
+    else:
+        pts = world_coords
+
+    return pts
+
+def get_interpolate_depth(depth_map, u, v):
+    '''
+    Interpolates the depth at specified non-integer pixel coordinates (u, v) using bilinear interpolation.
+
+    Input:
+        depth_map: torch.Tensor in shape [H, W]
+        u, v: pixel coordinates in shape [N], torch.Tensor in floating points
+    Return:
+        corresponding depth value in pixel location with interpolation
+    '''
+    H, W = depth_map.shape
+    max_h, max_w = H - 1, W - 1
+
+    # Corners of the integer bounding box
+    u0 = torch.floor(u).clamp(0, max_w)
+    v0 = torch.floor(v).clamp(0, max_h)
+    u1 = (u0 + 1).clamp(0, max_w)
+    v1 = (v0 + 1).clamp(0, max_h)
+
+    # Fractional parts
+    u_frac = u - u0
+    v_frac = v - v0
+
+    # Gather the four nearest neighbors
+    top_left = depth_map[v0.long(), u0.long()]
+    top_right = depth_map[v0.long(), u1.long()]
+    bottom_left = depth_map[v1.long(), u0.long()]
+    bottom_right = depth_map[v1.long(), u1.long()]
+
+    # Bilinear interpolation
+    top = (1 - u_frac) * top_left + u_frac * top_right
+    bottom = (1 - u_frac) * bottom_left + u_frac * bottom_right
+    interpolated_depth = (1 - v_frac) * top + v_frac * bottom
+
+    return interpolated_depth
+
+def get_point_cloud_given_uv(depth, u, v, K):
+    '''
+    Retrieve the point cloud given depth map and the query pixel location u, v.
+
+    Args:
+        depth (torch.Tensor): Depth map in shape [H, W].
+        u (torch.Tensor): Pixel coordinates along the width.
+        v (torch.Tensor): Pixel coordinates along the height.
+        K (torch.Tensor): Camera intrinsic matrix in shape [3, 3].
+
+    Returns:
+        pts (torch.Tensor): 3D points in the pixel location u, v.
+    '''
+
+    # Validate inputs
+    assert u.size(0) == v.size(0), "u and v should have the same number of elements"
+    assert K.size() == (3, 3), "Camera intrinsic matrix K must be 3x3"
+
+    # Extract the intrinsic parameters
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    # Ensure the indices are within the bounds of the depth map
+    H, W = depth.shape
+    assert u.min() >= 0 and u.max() < W, "u-coordinate out of bounds"
+    assert v.min() >= 0 and v.max() < H, "v-coordinate out of bounds"
+
+    # Extract depth values at the specified u, v coordinates
+    # selected_depths = depth[v, u]
+    selected_depths = get_interpolate_depth(depth, u, v)
+
+    # Convert image coordinates (u, v) into normalized camera coordinates
+    x = (u.float() - cx) / fx * selected_depths
+    y = (v.float() - cy) / fy * selected_depths
+    z = selected_depths
+
+    # Stack into a [N, 3] tensor where N is number of points
+    pts = torch.stack((x, y, z), dim=1)
+
+    return pts.float()
+
+def scale_alignment(depth_map1: torch.Tensor, depth_map2: torch.Tensor, pos1: torch.Tensor, pos2: torch.Tensor) -> float:
+    '''
+    Align the scale given two depth maps and corresponding matched positions.
+
+    Args:
+        depth_map1 (torch.Tensor): Depth map of the first frame.
+        depth_map2 (torch.Tensor): Depth map of the second frame.
+        pos1 (torch.Tensor): Pixel positions of matched points in the first frame in shape [N, 2].
+        pos2 (torch.Tensor): Pixel positions of matched points in the second frame in shape [N, 2].
+
+    Returns:
+        scale (float): Scale factor between two frames obtained as median of per-point depth ratios.
+                       The scale would typically be used as depth_map1 * scale_factor = depth_map2.
+    '''
+
+    # Ensure that pos1 and pos2 have integer coordinates suitable for indexing depth maps
+    pos1 = pos1.long()
+    pos2 = pos2.long()
+
+    # Retrieve depth values at matched positions
+    depth_values1 = depth_map1[pos1[:, 1], pos1[:, 0]]  # Indexing with y (row), x (column)
+    depth_values2 = depth_map2[pos2[:, 1], pos2[:, 0]]
+
+    # Handle zero depth values to prevent division by zero
+    valid_mask = (depth_values1 > 0) & (depth_values2 > 0)
+    valid_depths1 = depth_values1[valid_mask]
+    valid_depths2 = depth_values2[valid_mask]
+
+    # Calculate per-point scale factors as the ratio of depths
+    scale_factors = valid_depths1 / valid_depths2
+
+    # Compute the median scale factor to avoid influence of outliers
+    if len(scale_factors) > 0:
+        scale_factor = torch.median(scale_factors).item()
+    else:
+        scale_factor = 1.0  # Default to no scaling if no valid depths
+
+    return scale_factor
+
+
+def estimate_pose_ransac(pts_a, pts_b, K):
+    """
+    Estimate the pose between two sets of points from two images using the RANSAC algorithm.
+
+    Parameters:
+    pts_a (np.array): Coordinates of matched points in the first image, shape (N, 2)
+    pts_b (np.array): Coordinates of matched points in the second image, shape (N, 2)
+    K (np.array): The 3x3 intrinsic camera matrix
+
+    Returns:
+    R (np.array): The 3x3 rotation matrix
+    t (np.array): The 3x1 translation vector
+    mask (np.array): The mask of inliers computed by RANSAC (1=inlier, 0=outlier)
+    """
+
+    # Normalize the points using the intrinsic matrix
+    pts_a_norm = cv2.undistortPoints(np.expand_dims(pts_a, axis=1), cameraMatrix=K, distCoeffs=None)
+    pts_b_norm = cv2.undistortPoints(np.expand_dims(pts_b, axis=1), cameraMatrix=K, distCoeffs=None)
+
+    # Estimate the Essential Matrix using RANSAC
+    E, mask = cv2.findEssentialMat(pts_a_norm, pts_b_norm, focal=1.0, pp=(0, 0), method=cv2.RANSAC, prob=0.999, threshold=1)
+
+    # Decompose the Essential Matrix into rotation and translation
+    _, R, t, _ = cv2.recoverPose(E, pts_a_norm, pts_b_norm, focal=1.0, pp=(0, 0))
+
+    return R, t, mask
+
+# def compute_dynamic_position(static_pos, motion_params):
+#     dy_q = motion_params['quaternion']
+#     dy_T = motion_params['translation'].unsqueeze(1)
+#     pts_num = static_pos.shape[0]
+#     homo_pos = torch.concat(
+#         (static_pos, torch.ones([pts_num, 1], device=static_pos.device)),
+#                             dim=1)
+    
+#     # construct transformation matrix
+#     dy_rot = quat_to_rotmat(dy_q)
+#     trans = torch.concat([dy_rot, dy_T], dim=1)
+    
+#     trans_homo = torch.zeros([dy_rot.shape[0], 4, 4]).to(dy_rot)
+#     trans_homo[:, :, :3] = trans
+#     trans_homo[:, -1, -1] = 1
+    
+    
+#     pass
+
+
+def motion_temporal_smoothness(motions):
+    # rotation is near identiacl
+    
+    # translation is near 0
+    
+    pass
+
+# def motion_local_smoothness(motions, knn_idx):
+#     '''
+    
+#     knn_idx: in one hot format
+#     '''
+#     _, n, k = knn_idx.shape
+#     qua = motions['quaternion']
+#     trans = motions['translation']
+#     rotmat = quat_to_rotmat(qua)
+#     # R1 dot R2' = I
+#     rotmat_reshape = rotmat.unsqueeze(0).view(1, -1, 9)
+#     rotmat_gather = knn_gather(rotmat_reshape, knn_idx)
+#     rotmat_gather = rotmat_gather.view(n, k, 3, 3).permute(0, 1, 3, 2) # transpose
+#     rotmat_original = rotmat.unsqueeze(1).repeat(1, k, 1, 1)
+#     rot_id = torch.eye(3).view(1, 1, 3, 3).repeat(n, k, 1, 1).to(rotmat_original)
+#     rot_mult = torch.einsum('ijkl,ijkl->ijkl', rotmat_original, rotmat_gather) 
+#     rot_diff = rot_mult - rot_id
+#     rot_diff_norm = torch.linalg.norm(rot_diff, ord='fro', dim=[2, 3]).mean()
+    
+#     # T1 - T2 = 0
+#     trans_reshape = trans.unsqueeze(0)
+#     trans_gather = knn_gather(trans_reshape, knn_idx)
+#     trans_original = trans.unsqueeze(1).repeat(1, 1, k, 1)
+#     trans_diff = trans_gather - trans_original
+#     trans_norm = trans_diff.abs().sum(dim=-1).max()
+#     return rot_diff_norm, trans_norm
+
+# def 
+
+def get_point_cloud_world_coordinates(depth, u, v, K, c2w):
+    '''
+    Retrieve the point cloud in world coordinates given depth map, query pixel location u, v, camera intrinsics, and camera-to-world transformation.
+
+    Args:
+        depth (torch.Tensor): Depth map in shape [H, W].
+        u (torch.Tensor): Pixel coordinates along the width.
+        v (torch.Tensor): Pixel coordinates along the height.
+        K (torch.Tensor): Camera intrinsic matrix in shape [3, 3].
+        c2w (torch.Tensor): Camera-to-world transformation matrix in shape [4, 4].
+
+    Returns:
+        pts_world (torch.Tensor): 3D points in the world coordinate system.
+    '''
+
+    # Validate inputs
+    assert u.size(0) == v.size(0), "u and v should have the same number of elements"
+    assert K.size() == (3, 3), "Camera intrinsic matrix K must be 3x3"
+    assert c2w.size() == (4, 4), "Camera-to-world transformation matrix must be 4x4"
+
+    # Extract the intrinsic parameters
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    # Ensure the indices are within the bounds of the depth map
+    H, W = depth.shape
+    assert u.min() >= 0 and u.max() < W, "u-coordinate out of bounds"
+    assert v.min() >= 0 and v.max() < H, "v-coordinate out of bounds"
+
+    # Extract depth values at the specified u, v coordinates
+    selected_depths = get_interpolate_depth(depth, u, v)
+
+    # Convert image coordinates (u, v) into normalized camera coordinates
+    x = (u.float() - cx) / fx * selected_depths
+    y = (v.float() - cy) / fy * selected_depths
+    z = selected_depths
+
+    # Stack into a [N, 3] tensor where N is number of points
+    pts_camera = torch.stack((x, y, z), dim=1)
+
+    # Convert to homogeneous coordinates [N, 4]
+    pts_camera_homogeneous = torch.cat((pts_camera, torch.ones(pts_camera.size(0), 1).to(pts_camera)), dim=1)
+
+    # Apply the camera-to-world transformation
+    pts_world_homogeneous = torch.mm(pts_camera_homogeneous, c2w.T)
+
+    # Convert back to non-homogeneous coordinates
+    pts_world = pts_world_homogeneous[:, :3]
+
+    return pts_world.float()

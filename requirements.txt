@@ -10,7 +10,8 @@ transformers==4.46.1
 tokenizers==0.20.1
 diffusers==0.31.0
 accelerate==1.0.1
-xformers==0.0.22.post7
+# xformers==0.0.22.post7
+# xformers==0.0.28.dev893+cu124
 grpcio-status==1.33.2 
 protobuf==3.20.2
 safetensors
@@ -23,7 +24,8 @@ xatlas
 fpsample
 fast-simplification
 numpy==1.26.1
-git+https://github.com/ashawkey/diff-gaussian-rasterization.git
-git+https://github.com/hbb1/diff-surfel-rasterization.git
-git+https://github.com/NVlabs/nvdiffrast.git
-git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
+onnxruntime
+# git+https://github.com/ashawkey/diff-gaussian-rasterization.git
+# git+https://github.com/hbb1/diff-surfel-rasterization.git
+# git+https://github.com/NVlabs/nvdiffrast.git
+# git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8

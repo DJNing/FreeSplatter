@@ -68,6 +68,9 @@ def save_gaussian(latent, gs_vis_path, model, opacity_threshold=None, pad_2dgs_s
     pc_vis = model.gs_renderer.gaussian_model.set_data(
         xyz.float(), features.float(), scaling.float(), rotation.float(), opacity.float())
     pc_vis.save_ply_vis(gs_vis_path)
+    full_name = gs_vis_path.replace('.ply', '_full.ply')
+    pc_vis.save_ply(full_name)
+    print(f'Save gaussian at {full_name}')
 
 
 class FreeSplatterRunner:
@@ -83,35 +86,39 @@ class FreeSplatterRunner:
         self.rembg.eval()
 
         # diffusion models
-        pipeline = DiffusionPipeline.from_pretrained(
-            "sudo-ai/zero123plus-v1.1", 
-            custom_pipeline="sudo-ai/zero123plus-pipeline",
-            torch_dtype=torch.float16,
-            cache_dir="ckpts/",
-        )
-        pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-            pipeline.scheduler.config, timestep_spacing='trailing'
-        )
-        self.zero123plus_v11 = pipeline.to(device)
+        # pipeline = DiffusionPipeline.from_pretrained(
+        #     "sudo-ai/zero123plus-v1.1", 
+        #     custom_pipeline="sudo-ai/zero123plus-pipeline",
+        #     torch_dtype=torch.float16,
+        #     cache_dir="ckpts/",
+        # )
+        # pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
+        #     pipeline.scheduler.config, timestep_spacing='trailing'
+        # )
+        # self.zero123plus_v11 = pipeline.to(device)
+        self.zero123plus_v11 = None
 
-        pipeline = DiffusionPipeline.from_pretrained(
-            "sudo-ai/zero123plus-v1.2", 
-            custom_pipeline="sudo-ai/zero123plus-pipeline",
-            torch_dtype=torch.float16,
-            cache_dir="ckpts/",
-        )
-        pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-            pipeline.scheduler.config, timestep_spacing='trailing'
-        )
-        self.zero123plus_v12 = pipeline.to(device)
+        # pipeline = DiffusionPipeline.from_pretrained(
+        #     "sudo-ai/zero123plus-v1.2", 
+        #     custom_pipeline="sudo-ai/zero123plus-pipeline",
+        #     torch_dtype=torch.float16,
+        #     cache_dir="ckpts/",
+        # )
+        # pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
+        #     pipeline.scheduler.config, timestep_spacing='trailing'
+        # )
+        self.zero123plus_v12 = None
 
-        pipeline = HunYuan3D_MVD_Std_Pipeline.from_pretrained(
-            './ckpts/Hunyuan3D-1/mvd_std',
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-        )
-        self.hunyuan3d_mvd_std = pipeline.to(device)
-
+        # pipeline = HunYuan3D_MVD_Std_Pipeline.from_pretrained(
+        #     './ckpts/Hunyuan3D-1/mvd_std',
+        #     torch_dtype=torch.float16,
+        #     use_safetensors=True,
+        # )
+        self.hunyuan3d_mvd_std = None
+        
+        
+        # import pdb
+        # pdb.set_trace()
         # freesplatter
         config_file = 'configs/freesplatter-object.yaml'
         ckpt_path = hf_hub_download('TencentARC/FreeSplatter', repo_type='model', filename='freesplatter-object.safetensors', local_dir='./ckpts/FreeSplatter')
@@ -122,26 +129,28 @@ class FreeSplatterRunner:
                 state_dict[key] = f.get_tensor(key)
         model.load_state_dict(state_dict, strict=True)
         self.freesplatter = model.eval().to(device)
+        # pdb.set_trace()
+        # config_file = 'configs/freesplatter-object-2dgs.yaml'
+        # ckpt_path = hf_hub_download('TencentARC/FreeSplatter', repo_type='model', filename='freesplatter-object-2dgs.safetensors', local_dir='./ckpts/FreeSplatter')
+        # model = instantiate_from_config(OmegaConf.load(config_file).model)
+        # state_dict = {}
+        # with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+        #     for key in f.keys():
+        #         state_dict[key] = f.get_tensor(key)
+        # model.load_state_dict(state_dict, strict=True)
+        # self.freesplatter_2dgs = model.eval().to(device)
+        self.freesplatter_2dgs = None
 
-        config_file = 'configs/freesplatter-object-2dgs.yaml'
-        ckpt_path = hf_hub_download('TencentARC/FreeSplatter', repo_type='model', filename='freesplatter-object-2dgs.safetensors', local_dir='./ckpts/FreeSplatter')
-        model = instantiate_from_config(OmegaConf.load(config_file).model)
-        state_dict = {}
-        with safe_open(ckpt_path, framework="pt", device="cpu") as f:
-            for key in f.keys():
-                state_dict[key] = f.get_tensor(key)
-        model.load_state_dict(state_dict, strict=True)
-        self.freesplatter_2dgs = model.eval().to(device)
-
-        config_file = 'configs/freesplatter-scene.yaml'
-        ckpt_path = hf_hub_download('TencentARC/FreeSplatter', repo_type='model', filename='freesplatter-scene.safetensors', local_dir='./ckpts/FreeSplatter')
-        model = instantiate_from_config(OmegaConf.load(config_file).model)
-        state_dict = {}
-        with safe_open(ckpt_path, framework="pt", device="cpu") as f:
-            for key in f.keys():
-                state_dict[key] = f.get_tensor(key)
-        model.load_state_dict(state_dict, strict=True)
-        self.freesplatter_scene = model.eval().to(device)
+        # config_file = 'configs/freesplatter-scene.yaml'
+        # ckpt_path = hf_hub_download('TencentARC/FreeSplatter', repo_type='model', filename='freesplatter-scene.safetensors', local_dir='./ckpts/FreeSplatter')
+        # model = instantiate_from_config(OmegaConf.load(config_file).model)
+        # state_dict = {}
+        # with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+        #     for key in f.keys():
+        #         state_dict[key] = f.get_tensor(key)
+        # model.load_state_dict(state_dict, strict=True)
+        # self.freesplatter_scene = model.eval().to(device)
+        self.freesplatter_scene = None
 
     @torch.inference_mode()
     def run_segmentation(
@@ -306,11 +315,22 @@ class FreeSplatterRunner:
         c2ws_pred, focals_pred = freesplatter.estimate_poses(images, gaussians, masks=alphas, use_first_focal=True, pnp_iter=10)
         fig = self.visualize_cameras_object(images, c2ws_pred, focals_pred, legends=legends)
         t2 = time.time()
-        
+        import pdb
+        # pdb.set_trace()
         # save gaussians
         gs_vis_path = os.path.join(self.output_dir, 'gs_vis.ply')
+        c2ws_pred_path = os.path.join(self.output_dir, 'c2ws_pred.txt')
+        focals_pred_path = os.path.join(self.output_dir, 'focals_pred.txt')
+        np.savetxt(focals_pred_path, focals_pred.mean().detach().cpu().numpy().reshape(1,1)/512)
+        # pdb.set_trace()
+        np.savetxt(c2ws_pred_path, c2ws_pred.detach().cpu().numpy().reshape(4, -1))
+        
         save_gaussian(gaussians, gs_vis_path, freesplatter, opacity_threshold=5e-3, pad_2dgs_scale=True)
         print(f'Save gaussian at {gs_vis_path}')
+
+        # save gaussian pth
+        gaussians_path = os.path.join(self.output_dir, 'gaussians.pth')
+        torch.save(gaussians, gaussians_path)
 
         # render video
         with torch.inference_mode():
@@ -380,15 +400,15 @@ class FreeSplatterRunner:
 
         # out_mesh = Mesh.load(str(mesh_path), auto_uv=False, device='cpu')
         out_mesh = trimesh.load(str(mesh_path), process=False)
-        out_mesh = optimize_mesh(
-            out_mesh, 
-            images_bake, 
-            alphas_bake.squeeze(-1), 
-            c2ws_fusion[cam_inds].inverse(), 
-            intrinsics,
-            simplify=mesh_reduction,
-            verbose=False
-        )
+        # out_mesh = optimize_mesh(
+        #     out_mesh, 
+        #     images_bake, 
+        #     alphas_bake.squeeze(-1), 
+        #     c2ws_fusion[cam_inds].inverse(), 
+        #     intrinsics,
+        #     simplify=mesh_reduction,
+        #     verbose=False
+        # )
         mesh_fine_path = os.path.join(self.output_dir, 'mesh.glb')
 
         out_mesh.export(mesh_fine_path)
@@ -414,6 +434,8 @@ class FreeSplatterRunner:
         images = (images.permute(0, 2, 3, 1).detach().cpu().numpy() * 255).astype(np.uint8)
 
         cam2world = create_camera_to_world(torch.tensor([0, -2, 0]), camera_system='opencv').to(c2ws)
+        # import pdb
+        # pdb.set_trace()
         transform = cam2world @ torch.linalg.inv(c2ws[0:1])
         c2ws = transform @ c2ws
         c2ws = c2ws.detach().cpu().numpy()
